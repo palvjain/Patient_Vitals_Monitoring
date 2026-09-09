@@ -19,28 +19,41 @@ Simulator (Python) → Pub/Sub → Dataflow (Apache Beam) → GCS (Bronze/Silver
 
 ## How It Works
 
-**1. Data Source (Simulator)**
-`patient_vitals_simulator.py` generates one record every 2 seconds for 20 simulated 
-patients — heart rate, SpO2, temperature, and blood pressure (systolic/diastolic) — 
-and publishes each as JSON to a Pub/Sub topic. A configurable `ERROR_RATE` randomly 
-injects missing fields, negative values, or out-of-range values to simulate real-world 
-data quality issues.
+### 1. Simulator (the data source)
 
-**2. Bronze Layer**
-The Dataflow pipeline reads raw messages from the Pub/Sub subscription, decodes them, 
-and writes the unmodified JSON directly to a `bronze/` folder in GCS every 60-second window.
+patient_vitals_simulator.py` generates 20 patients and creates a new vitals reading every 
+2 seconds for a random one of them — heart rate, oxygen level (SpO2), temperature, and 
+blood pressure. The ranges are a bit wider than "healthy normal" on purpose, so some 
+readings come out looking risky and the dashboard actually has variety to show.
+About 10% of records get a deliberate error thrown in (a missing field, a negative heart 
+rate, or an impossible SpO2 like 150) — this is just so the cleaning step later actually 
+has something to clean. Each record gets turned into JSON and published to a Pub/Sub topic.
 
-**3. Silver Layer**
-Records are parsed, validated (removing nulls, negative heart rates, out-of-range SpO2 
-readings), and enriched with a calculated `risk_score` and `risk_level` (Low / Moderate / 
-High) based on heart rate, temperature, and SpO2. Cleaned records are written to `silver/` in GCS.
+### 2. Bronze layer — raw data, untouched
 
-**4. Gold Layer**
-Silver records are grouped by `patient_id` and aggregated (average heart rate, SpO2, 
-temperature, and the max risk level observed) before being appended to a BigQuery table.
+Dataflow reads the messages straight off Pub/Sub, decodes them back into text, batches 
+them into 60-second windows, and dumps them as-is into a `bronze/` folder in GCS. No 
+cleaning here — this is just a raw backup of everything that came through.
 
-**5. Visualization**
-Power BI connects to the BigQuery Gold table using **DirectQuery** , so 
-dashboards refresh automatically as new data streams in.
+### 3. Silver layer — cleaning it up
 
+From that same stream, the pipeline:
+- Turns the JSON back into a usable record
+- Throws out anything broken (missing fields, negative heart rate, SpO2 over 100, etc.)
+- Calculates a risk score using heart rate, temperature, and SpO2 (higher heart rate and 
+  temperature = more risk; lower SpO2 = more risk, since low oxygen is bad)
+- Labels each record Low / Moderate / High risk based on that score
+- Saves the cleaned version to `silver/` in GCS
+
+### 4. Gold layer — one summary per patient
+
+Since each patient shows up in multiple records, this step groups everything by 
+`patient_id` and averages out their heart rate, SpO2, and temperature. For risk level, it 
+just takes the worst one they hit (if they were ever "High," they're marked High overall). 
+This final summary gets appended into a BigQuery table.
+
+### 5. Power BI dashboard
+
+Power BI connects straight to the BigQuery table using DirectQuery. The dashboard has a dropdown to pick a patient, three gauges (heart rate, SpO2, 
+temperature) that turn more red the riskier the number gets, and a card showing that patient's overall risk level.
 
